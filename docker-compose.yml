@@ -1,0 +1,21 @@
+# 3x-ui — панель управления Xray (VLESS+Reality и др.)
+# Образ и шаблон: https://github.com/MHSanaei/3x-ui/wiki/Installation
+services:
+  3xui:
+    image: ghcr.io/mhsanaei/3x-ui:latest
+    container_name: 3xui_app
+    # NET_ADMIN/NET_RAW нужны встроенному fail2ban (банит IP через iptables хоста)
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./db/:/etc/x-ui/      # база панели (sqlite): юзеры, ключи, настройки
+      - ./cert/:/root/cert/   # сертификаты, если позже прикрутишь домен
+    environment:
+      XRAY_VMESS_AEAD_FORCED: "false"
+      XUI_ENABLE_FAIL2BAN: "true"
+    tty: true
+    # host-сеть: панель сама слушает свои порты (2053 — панель, 443 — Reality и т.д.),
+    # а правила UFW при этом реально работают (в отличие от проброса портов Docker)
+    network_mode: host
+    restart: unless-stopped
