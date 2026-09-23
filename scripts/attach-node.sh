@@ -33,41 +33,56 @@ import json,sys
 want = sys.argv[1]
 d = json.load(sys.stdin)["obj"]
 lst = d if isinstance(d, list) else d.get("inbounds", [])
-cands = [i for i in lst if not i.get("nodeId") and i.get("protocol") == "vless"]
 if want:
-    cands = [i for i in cands if str(i.get("id")) == want]
-if not cands:
-    print("", end=""); raise SystemExit(0)
-print(json.dumps(cands[0]), end="")
+    cands = [i for i in lst if str(i.get("id")) == want]
+else:
+    # 1) локальный vless-инбаунд мастера; 2) иначе — копия с последней ноды
+    cands = [i for i in lst if not i.get("nodeId") and i.get("protocol") == "vless"]
+    if not cands:
+        cands = sorted([i for i in lst if i.get("nodeId") and i.get("protocol") == "vless"],
+                       key=lambda x: x.get("id", 0), reverse=True)
+print(json.dumps(cands[0]) if cands else "", end="")
 PY
 TPL=$(printf '%s' "$L" | python3 "$TPL_PROG" "$TPL_ID")
 rm -f "$TPL_PROG"
-[[ -n "$TPL" ]] || { echo "[x] локальный vless-инбаунд не найден (создай его в панели и повтори)" >&2; exit 1; }
 
 # 3. Собираем инбаунд для ноды: те же клиенты, свои ключи Reality, порт 443 (если шаблон на 8443)
 KEYS=$(xui_api GET /server/getNewX25519Cert '')
 PAY_PROG="$(mktemp)"
 cat > "$PAY_PROG" <<'PY'
 import json,sys,secrets
-tpl=json.loads(sys.stdin.readline())
-keys=json.loads(sys.stdin.readline())["obj"]
-node_ip,nid=sys.argv[1],int(sys.argv[2])
-stream=json.loads(tpl["streamSettings"])
-rs=stream.get("realitySettings")
+line = sys.stdin.readline().strip()
+keys = json.loads(sys.stdin.readline())["obj"]
+node_ip, nid = sys.argv[1], int(sys.argv[2])
+DEFAULT_STREAM = {"network":"tcp","security":"reality","externalProxy":[],
+  "realitySettings":{"show":False,"dest":"www.yahoo.com:443","xver":0,
+    "serverNames":["www.yahoo.com"],"privateKey":"","shortIds":[],
+    "settings":{"publicKey":"","fingerprint":"chrome","serverName":"www.yahoo.com","spiderX":"/"}},
+  "tcpSettings":{"acceptProxyProtocol":False,"header":{"type":"none"}}}
+if line:
+    tpl = json.loads(line)
+    stream = json.loads(tpl["streamSettings"])
+    settings = tpl["settings"]
+    port = 443 if tpl.get("port") == 8443 else tpl.get("port")
+else:
+    tpl = None; stream = DEFAULT_STREAM
+    settings = json.dumps({"clients":[],"decryption":"none","fallbacks":[]})
+    port = 443
+rs = stream.get("realitySettings")
 if rs:
-    rs["privateKey"]=keys["privateKey"]
-    rs["shortIds"]=[secrets.token_hex(8)]
-    rs.setdefault("settings",{})["publicKey"]=keys["publicKey"]
-port=443 if tpl.get("port")==8443 else tpl.get("port")
-out={"remark":f"node-reality-{node_ip}","enable":True,"listen":"","port":port,
-     "protocol":"vless","tag":f"in-node-{node_ip}-{port}",
-     "settings":tpl["settings"],"streamSettings":json.dumps(stream),
-     "sniffing":tpl.get("sniffing") or '{"enabled":true,"destOverride":["http","tls","quic"]}',
-     "nodeId":nid}
-print(json.dumps(out),end="")
+    rs["privateKey"] = keys["privateKey"]
+    rs["shortIds"] = [secrets.token_hex(8)]
+    rs.setdefault("settings", {})["publicKey"] = keys["publicKey"]
+out = {"remark": f"node-reality-{node_ip}", "enable": True, "listen": "", "port": port,
+       "protocol": "vless", "tag": f"in-node-{node_ip}-{port}",
+       "settings": settings, "streamSettings": json.dumps(stream),
+       "sniffing": (tpl or {}).get("sniffing") or '{"enabled":true,"destOverride":["http","tls","quic"]}',
+       "nodeId": nid}
+print(json.dumps(out), end="")
 PY
 PAYLOAD=$(printf '%s\n%s' "$TPL" "$KEYS" | python3 "$PAY_PROG" "$NODE_IP" "$NID")
 rm -f "$PAY_PROG"
+[[ -n "$PAYLOAD" ]] || { echo "[x] не удалось собрать конфиг инбаунда" >&2; exit 1; }
 R2=$(xui_api POST /inbounds/add "$PAYLOAD")
 ID2=$(printf '%s' "$R2" | python3 -c "import sys,json;d=json.load(sys.stdin);print((d.get('obj') or {}).get('id',''))" 2>/dev/null || true)
 [[ -n "$ID2" ]] || { echo "[x] инбаунд на ноду не развёрнут: ${R2:0:300}" >&2; exit 1; }
