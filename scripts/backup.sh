@@ -5,7 +5,7 @@
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/3x-ui}"
-KEEP="${KEEP:-14}"
+KEEP="${KEEP:-7}"
 
 cd "$APP_DIR"
 mkdir -p backups
