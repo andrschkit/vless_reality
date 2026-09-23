@@ -54,7 +54,7 @@ d = json.load(sys.stdin)["obj"]
 d["webBasePath"] = sys.argv[1]
 d["webDomain"] = sys.argv[2]
 d["subListen"] = "127.0.0.1"
-d["subURI"] = "https://" + sys.argv[2] + d["subPath"].rstrip("/")
+d["subURI"] = "https://" + sys.argv[2] + d["subPath"].rstrip("/") + "/"  # слэш в конце обязателен: панель клеит subURI+subId
 json.dump(d, open("/tmp/master_settings.json","w"))
 print("subPath:", d["subPath"], "| subJsonPath:", d["subJsonPath"], "| subClashPath:", d["subClashPath"], file=sys.stderr)
 PY
@@ -76,7 +76,7 @@ install -m 700 "$SCRIPT_DIR/certbot/porkbun-cleanup.sh" /usr/local/bin/porkbun-c
 SUB_PATH="$(printf '%s' "$CUR" | python3 -c "import sys,json;print(json.load(sys.stdin)['obj']['subPath'])")"
 SUB_JSON="$(printf '%s' "$CUR" | python3 -c "import sys,json;print(json.load(sys.stdin)['obj']['subJsonPath'])")"
 SUB_CLASH="$(printf '%s' "$CUR" | python3 -c "import sys,json;print(json.load(sys.stdin)['obj']['subClashPath'])")"
-bash "$SCRIPT_DIR/setup-web.sh" "$DOMAIN" "$NBP" "$SUB_PATH" "$SUB_JSON" "$SUB_CLASH" 8443
+bash "$SCRIPT_DIR/setup-web.sh" "$DOMAIN" "$NBP" "$SUB_PATH" "$SUB_JSON" "$SUB_CLASH"
 
 # 6. Проверка и карточка мастера
 code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN${NBP%/}/")

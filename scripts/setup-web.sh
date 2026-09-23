@@ -4,8 +4,9 @@
 # Что делает:
 #   1. Ставит nginx и certbot.
 #   2. Пишет серверный блок: домен → панель (по секретному пути) и подписки (по секретным путям).
-#   3. Открывает 80/443 (nginx), открывает порт Reality мастера (по умолчанию 8443),
-#      закрывает наружный доступ к панели (2053) — она доступна только через nginx.
+#   3. Открывает 80/443 (nginx), закрывает наружный доступ к панели (2053) — она доступна
+#      только через nginx. Порт Reality мастера (REALITY_PORT) открывается, только если
+#      передан явно и непустой — у control-plane-мастера VPN-инбаундов нет.
 #   4. Выпускает сертификат Let's Encrypt через DNS-01 (хуки porkbun-*.sh,
 #      ключи из /root/.porkbun-keys). HTTP-01 не работает, если хостер
 #      фильтрует входящий 80 порт для чужих сетей — поэтому DNS-01.
@@ -16,7 +17,7 @@
 # Запуск на мастере:
 #   bash scripts/setup-web.sh <ДОМЕН> <PANEL_BASE_PATH> <SUB_PATH> [SUB_JSON_PATH] [SUB_CLASH_PATH] [REALITY_PORT]
 # Пример:
-#   bash scripts/setup-web.sh abs.4myfamdom.xyz /dc2aa7ceebcf/ /kfaatpmh442ci4kr/ /9j7u7kjlj7t0m7nz/ /ez3yhxism2a09dfd/ 8443
+#   bash scripts/setup-web.sh abs.4myfamdom.xyz /dc2aa7ceebcf/ /kfaatpmh442ci4kr/ /9j7u7kjlj7t0m7nz/ /ez3yhxism2a09dfd/
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "[x] Запусти от root" >&2; exit 1; }
@@ -26,7 +27,7 @@ PANEL_PATH="${2:?Секретный путь панели (webBasePath), нап�
 SUB_PATH="${3:?Секретный путь подписок (subPath), напр. /kfaatpmh/}"
 SUB_JSON_PATH="${4:-}"
 SUB_CLASH_PATH="${5:-}"
-REALITY_PORT="${6:-8443}"
+REALITY_PORT="${6:-}"   # открывается в UFW, только если задан явно (у control-plane-мастера инбаундов нет)
 
 log() { echo -e "\033[1;32m[+]\033[0m $*"; }
 
@@ -84,9 +85,11 @@ log "nginx настроен: панель $PANEL_PATH, подписки $SUB_PAT
 log "Настраиваю UFW..."
 ufw allow 80/tcp comment 'http->https' >/dev/null
 ufw allow 443/tcp comment 'nginx https' >/dev/null
-ufw allow "$REALITY_PORT"/tcp comment 'VLESS Reality master' >/dev/null
+if [[ -n "$REALITY_PORT" ]]; then
+  ufw allow "$REALITY_PORT"/tcp comment 'VLESS Reality master' >/dev/null
+fi
 ufw delete allow 2053/tcp >/dev/null 2>&1 || true
-log "UFW: 80, 443 (nginx), $REALITY_PORT (Reality); панель 2053 — только локально (через nginx)"
+log "UFW: 80, 443 (nginx)${REALITY_PORT:+, $REALITY_PORT (Reality)}; панель 2053 — только локально (через nginx)"
 
 # --- сертификат ---
 if [ -d "$CERT_DIR" ]; then

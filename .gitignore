@@ -5,3 +5,4 @@ backups/
 AGENTS.md
 *.keys
 .porkbun-keys
+ssh-keys-for-pc.txt
