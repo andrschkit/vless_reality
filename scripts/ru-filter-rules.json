@@ -1,0 +1,10 @@
+[
+  {"type":"field","outboundTag":"blocked","domain":[
+    "ext:geosite_RU.dat:category-ru",
+    "ext:geosite_RU.dat:category-bank-ru",
+    "ext:geosite_RU.dat:category-gov-ru",
+    "ext:geosite_RU.dat:mailru",
+    "ext:geosite_RU.dat:tbank-ru"
+  ]},
+  {"type":"field","outboundTag":"blocked","ip":["ext:geoip_RU.dat:ru"]}
+]

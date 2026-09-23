@@ -1,3 +1,7 @@
 db/
 cert/
 backups/
+# Операционные секреты и заметки (см. AGENTS.md). В git не коммитить!
+AGENTS.md
+*.keys
+.porkbun-keys
