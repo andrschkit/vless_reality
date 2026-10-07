@@ -3,6 +3,7 @@ cert/
 backups/
 # Операционные секреты и заметки (см. AGENTS.md). В git не коммитить!
 AGENTS.md
+clients.txt
 *.keys
 .porkbun-keys
 ssh-keys-for-pc.txt

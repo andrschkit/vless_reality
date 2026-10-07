@@ -112,13 +112,16 @@ echo "[+] Инбаунд развёрнут на ноде (id $ID2, порт $(p
 # 4. Проверка
 sleep 10
 ST=$(xui_api GET /nodes/list '')
-printf '%s' "$ST" | python3 - "$NID" <<'PY'
+CHK_PROG="$(mktemp)"
+cat > "$CHK_PROG" <<'PY'
 import sys,json
 d=json.load(sys.stdin)["obj"]
 for n in (d if isinstance(d,list) else []):
     if n.get("id")==int(sys.argv[1]):
         print(f"[i] нода: status={n.get('status')} latency={n.get('latencyMs')}ms xray={n.get('xrayVersion')}")
 PY
+printf '%s' "$ST" | python3 "$CHK_PROG" "$NID"
+rm -f "$CHK_PROG"
 cat <<EOF
 
 [+] Готово. Подписки клиентов уже содержат новый сервер (те же UUID/subId);
