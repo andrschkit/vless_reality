@@ -1,0 +1,27 @@
+# Телеграм-бот семейного VPN. ТОЛЬКО мастер: docker compose -f docker-compose.bot.yml up -d --build
+# Бот не открывает ни одного входящего порта (long polling), панельную БД читает read-only.
+name: tg-vpn-bot
+services:
+  tg-bot:
+    build:
+      context: ./bot
+    image: vless-tg-bot:local
+    container_name: tg-vpn-bot
+    env_file:
+      - ./bot/bot.env          # генерирует scripts/install-bot.sh (chmod 600)
+    environment:
+      BOT_TOKEN_FILE: /run/secrets/tg-bot-token
+      XUI_DB: /data/x-ui.db
+      BOT_DB: /db/bot.db
+# БД панели в WAL: read-only чтение требует, чтобы -wal/-shm лежали рядом (панель
+# их держит постоянно, пока работает). Монтируем ВЕСЬ каталог db read-only.
+# Процесс в контейнере — root, но rootfs контейнера read-only, каталог панели ro:
+# повредить данные панели бот физически не может (только чтение).
+    volumes:
+      - /opt/3x-ui/bot/tg-bot-token:/run/secrets/tg-bot-token:ro
+      - /opt/3x-ui/db:/data:ro                      # sqlite панели (WAL: нужны db-wal/db-shm рядом)
+      - /opt/3x-ui/bot:/db                          # sqlite бота (привязки, инвайты, аудит)
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
