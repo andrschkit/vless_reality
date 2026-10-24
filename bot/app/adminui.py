@@ -160,7 +160,12 @@ async def _render_client_card(cq: CallbackQuery, email: str, from_family: bool =
     bound = await db.get_user_by_email(email)
     subid, _err = await subid_for(email)
     fam_txt = f"{family} (глава)" if family and head else (family or "Без семьи")
-    tg_txt = f"@{bound[1]} (tg_id {bound[0]})" if bound else "не привязан"
+    if not bound:
+        tg_txt = "не привязан"
+    elif bound[1]:
+        tg_txt = f"@{bound[1]} (tg_id {bound[0]})"
+    else:
+        tg_txt = f"tg_id {bound[0]} (без @username)"
     text = (
         f"{email}\n"
         f"subId: {subid or '—'}\n"
