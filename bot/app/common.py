@@ -84,6 +84,7 @@ USER_COMMANDS = [
 ]
 HEAD_COMMANDS = USER_COMMANDS + [
     BotCommand(command="family", description="Моя семья: /family <email> <моя семья>|-"),
+    BotCommand(command="invite", description="Пригласить члена семьи: /invite <email>"),
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [
     BotCommand(command="clients", description="Все клиенты панели"),

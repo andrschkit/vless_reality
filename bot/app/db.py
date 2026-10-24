@@ -106,12 +106,25 @@ class BotDB:
         )
         return [r[0] for r in await cur.fetchall()]
 
+    async def unassigned_clients_info(self):
+        """(email, bound) для виртуальной группы «Без семьи»."""
+        cur = await self.db.execute(
+            """SELECT c.email, u.tg_id IS NOT NULL FROM clients c
+               LEFT JOIN users u ON u.email = c.email
+               WHERE c.family IS NULL AND c.email != 'admin' ORDER BY c.email"""
+        )
+        return await cur.fetchall()
+
     async def family_names(self):
         cur = await self.db.execute(
             """SELECT family, COUNT(*) FROM clients
                WHERE family IS NOT NULL GROUP BY family ORDER BY family"""
         )
         return await cur.fetchall()
+
+    async def all_bound_tg_ids(self) -> list[int]:
+        cur = await self.db.execute("SELECT tg_id FROM users")
+        return [r[0] for r in await cur.fetchall()]
 
     async def delete_invite(self, code: str) -> None:
         await self.db.execute("DELETE FROM invites WHERE code=? AND used_tg_id IS NULL", (code,))

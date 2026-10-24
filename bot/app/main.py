@@ -40,12 +40,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 HELP_TEXT = """\
 Этот бот выдаёт персональную ссылку на семейный VPN.
 
-Как подключиться (Happ на iPhone):
+Happ на iPhone:
 1. Скопируй свою ссылку кнопкой «Моя ссылка».
 2. Happ → + → «Импорт из буфера» (или вставь в поле подписки).
 3. Включи переключатель — готово.
 
-v2rayNG (Android): настройки → «Импорт из буфера обмена», потом обновить подписку.
+Happ на Android:
+1. Установи Happ (Google Play) и открой его.
+2. Скопируй свою ссылку кнопкой «Моя ссылка».
+3. Happ → + → «Импорт из буфера обмена».
+4. Включи профиль — готово.
+
+ВАЖНО для Happ (и iPhone, и Android): настройка «Фрагментация» должна
+быть ВЫКЛЮЧЕНА. С включённой фрагментацией серверы Reality не работают
+(пинг есть, а интернета нет).
+
+v2rayNG (Android): настройки → «Импорт из буфера обмена», потом на главном
+экране обнови подписку.
 
 В ссылку уже включены все серверы сразу — выбирать ноду вручную не нужно.
 Приложение само покажет пинг каждого сервера.
@@ -118,11 +129,18 @@ async def cmd_start(m: Message, command: CommandObject) -> None:
 
 @router.message(Command("invite"))
 async def cmd_invite(m: Message, command: CommandObject) -> None:
-    if throttled(m.from_user.id) or not await require_admin(m):
+    if throttled(m.from_user.id):
         return
+    u = await require_head(m)
+    if not u:
+        return
+    _me, _un, is_admin, my_family, _hd = u
     email = (command.args or "").strip().lower()
     if not email:
-        await m.answer("Формат: /invite <email профиля в панели> (или кнопка «Админка» → клиент → «Пригласить»)")
+        await m.answer(
+            "Формат: /invite <email профиля> — у админа любой, у главы — только член его семьи. "
+            "Проще: «Моя семья» → человек → «Пригласить»."
+        )
         return
     try:
         subs = await panel.client_subids(email)
@@ -132,6 +150,11 @@ async def cmd_invite(m: Message, command: CommandObject) -> None:
     if not subs:
         await m.answer(f"Клиента {email} нет в панели. Сначала создайте его в 3x-ui (или проверьте email).")
         return
+    if not is_admin:
+        cl = await db.get_client(email)
+        if not cl or cl[1] != my_family:
+            await m.answer(f"Вы можете приглашать только членов своей семьи «{my_family}».")
+            return
     code = secrets.token_urlsafe(9)
     await db.create_invite(code, email, m.from_user.id, INVITE_TTL_DAYS)
     await db.audit(m.from_user.id, "invite_create", email)
@@ -243,8 +266,8 @@ async def cmd_family(m: Message, command: CommandObject) -> None:
         await m.answer(f"{email} убран из семьи «{target[1]}».")
         return
 
-    if not FAMILY_RE.match(fam):
-        await m.answer("Имя семьи: латиница, цифры, _ и -, до 24 символов.")
+    if not FAMILY_RE.match(fam) or fam == "fnone":
+        await m.answer("Имя семьи: латиница, цифры, _ и -, до 24 символов (имя «fnone» зарезервировано).")
         return
 
     mode = parts[2].lower() if len(parts) > 2 else ""
