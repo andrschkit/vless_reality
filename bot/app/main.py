@@ -1,43 +1,41 @@
-"""Телеграм-бот семейного VPN: свои ссылка/QR + статус нод + семейные ссылки.
+"""Телеграм-бот семейного VPN: сообщения, reply-кнопки, точка входа.
 
-MVP — только чтение (sqlite панели read-only). Мутации клиентов — фаза 2.
+Вся инлайн-навигация (Админка, семейные экраны) — в adminui.py;
+общие зависимости (БД, права, помощники) — в common.py.
 """
 import asyncio
-import io
 import logging
-import os
+import re
 import secrets
-import time
 
-import qrcode
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import (
-    BotCommand,
-    BotCommandScopeChat,
-    BotCommandScopeDefault,
-    BufferedInputFile,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    Message,
-    ReplyKeyboardMarkup,
-)
+from aiogram.types import CallbackQuery, Message
 
-from .db import BotDB
-from .panel import PanelDB, PanelError, ping_nodes
+from .adminui import ROOT_TEXT, render_family_view, root_markup, router as adminui_router
+from .common import (
+    ADMIN_BOOTSTRAP,
+    BOT_NAME,
+    BOT_TOKEN,
+    INVITE_TTL_DAYS,
+    SUB_URI,
+    apply_commands,
+    db,
+    fmt_ts,
+    greet,
+    log,
+    my_email,
+    panel,
+    qr_photo,
+    require_admin,
+    require_head,
+    subid_for,
+    throttled,
+    user_kb,
+)
+from .panel import PanelError, ping_nodes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("tg-vpn-bot")
-
-BOT_TOKEN = open(os.environ["BOT_TOKEN_FILE"]).read().strip()
-BOT_NAME = os.environ.get("BOT_NAME", "bot")
-SUB_URI = os.environ["SUB_URI"]
-XUI_DB = os.environ.get("XUI_DB", "/data/x-ui.db")
-BOT_DB = os.environ.get("BOT_DB", "/db/bot.db")
-ADMIN_BOOTSTRAP = os.environ.get("ADMIN_BOOTSTRAP", "")
-INVITE_TTL_DAYS = int(os.environ.get("INVITE_TTL_DAYS", "7"))
 
 HELP_TEXT = """\
 Этот бот выдаёт персональную ссылку на семейный VPN.
@@ -57,102 +55,17 @@ v2rayNG (Android): настройки → «Импорт из буфера об�
 там её увидят, и наш домен могут заблокировать. Лучше лично или через Telegram.
 """
 
-db = BotDB(BOT_DB)
-panel = PanelDB(XUI_DB)
+FAMILY_RE = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
+
 router = Router()
 
-# Меню подсказок при вводе "/" (Bot API setMyCommands). Общий список — всем,
-# полный (служебные команды) — только чату админа (scope чата).
-USER_COMMANDS = [
-    BotCommand(command="link", description="Моя ссылка подписки"),
-    BotCommand(command="qr", description="QR-код подписки"),
-    BotCommand(command="nodes", description="Ноды и их статус"),
-    BotCommand(command="myfamily", description="Моя семья (глава семьи)"),
-    BotCommand(command="help", description="Помощь: как подключиться"),
-]
-HEAD_COMMANDS = USER_COMMANDS + [
-    BotCommand(command="family", description="Моя семья: /family <email> <моя семья>|-"),
-]
-ADMIN_COMMANDS = USER_COMMANDS + [
-    BotCommand(command="clients", description="Все клиенты панели"),
-    BotCommand(command="invite", description="Инвайт: /invite <email>"),
-    BotCommand(command="invites", description="Активные инвайты"),
-    BotCommand(command="bind", description="Привязка: /bind <tg_id|@user> <email>"),
-    BotCommand(command="bindme", description="Привязать себя: /bindme <email>"),
-    BotCommand(command="family", description="Семья: /family <email> <семья> [head|member]; «-» убрать"),
-    BotCommand(command="families", description="Обзор семей"),
-    BotCommand(command="who", description="Кто привязан: /who <email>"),
-    BotCommand(command="audit", description="Последние действия"),
-    BotCommand(command="sync", description="Синхронизация реестра с панелью"),
-]
 
-
-_LEVELS = {"user": USER_COMMANDS, "head": HEAD_COMMANDS, "admin": ADMIN_COMMANDS}
-
-
-async def apply_commands(bot: Bot, tg_id: int | None = None, level: str = "user") -> None:
-    """Меню подсказок: общее (tg_id=None) или для конкретного чата; level = user|head|admin."""
-    try:
-        cmds = _LEVELS.get(level, USER_COMMANDS)
-        if tg_id is None:
-            await bot.set_my_commands(cmds, scope=BotCommandScopeDefault())
-        else:
-            await bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=tg_id))
-    except Exception:
-        log.exception("не удалось выставить меню команд")
-
-_last_cmd: dict[int, float] = {}
-
-
-def throttled(tg_id: int) -> bool:
-    now = time.monotonic()
-    if now - _last_cmd.get(tg_id, 0.0) < 1.2:
-        return True
-    _last_cmd[tg_id] = now
-    return False
-
-
-def fmt_ts(ts: int) -> str:
-    return time.strftime("%d.%m %H:%M", time.localtime(ts))
-
-
-async def subid_for(email: str) -> tuple[str | None, str | None]:
-    """(subId, None) или (None, текст ошибки для пользователя)."""
-    try:
-        subs = await panel.client_subids(email)
-    except PanelError:
-        return None, "Техническая пауза — попробуйте через минуту."
-    if not subs:
-        return None, "Ваш профиль не найден в панели. Обратитесь к администратору."
-    vals = {v for v in subs.values() if v}
-    if len(vals) != 1:
-        log.warning("subId расходятся для %s: %s", email, subs)
-        return None, "С профилем неполадка (ссылки на серверах различаются). Уже сообщено администратору."
-    return vals.pop(), None
-
-
-def qr_photo(link: str) -> BufferedInputFile:
-    img = qrcode.make(link, box_size=8, border=2)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return BufferedInputFile(buf.getvalue(), filename="vpn.png")
-
-
-def user_kb(is_admin: bool, has_family_view: bool) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text="Моя ссылка"), KeyboardButton(text="QR-код")]]
-    if has_family_view:
-        rows.append([KeyboardButton(text="Моя семья")])
-    rows.append([KeyboardButton(text="Ноды и статус"), KeyboardButton(text="Помощь")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
-
-
-async def greet(u, m: Message) -> None:
-    email, _username, is_admin, family, head = u
-    kb = user_kb(bool(is_admin), bool(head or (is_admin and family)))
-    extra = ""
-    if is_admin:
-        extra = "\n\nКоманды администратора: /clients, /invite, /invites, /bind, /bindme, /family, /families, /who, /audit, /sync"
-    await m.answer(f"Здравствуйте! Ваш профиль: {email}.{extra}", reply_markup=kb)
+async def fresh_kb(tg_id: int):
+    """Актуальная reply-клавиатура пользователя (обновляем на каждом ответе без инлайна)."""
+    u = await db.get_user(tg_id)
+    if not u:
+        return None
+    return user_kb(bool(u[2]), bool(u[4] or (u[2] and u[3])))
 
 
 @router.message(CommandStart())
@@ -201,15 +114,7 @@ async def cmd_start(m: Message, command: CommandObject) -> None:
     await m.answer("Я бот семейного VPN. Для начала работы нужна пригласительная ссылка — попросите её у администратора.")
 
 
-async def require_admin(m: Message) -> bool:
-    u = await db.get_user(m.from_user.id)
-    if not u or not u[2]:
-        await db.audit(m.from_user.id, "deny_admin_cmd", m.text or "")
-        return False
-    # идемпотентно выставляем полное меню этого чата (self-heal после пересоздания контейнера)
-    await apply_commands(m.bot, m.from_user.id, level="admin")
-    return True
-
+# ---------- команды администратора (текстовый fallback, полный UI — «Админка») ----------
 
 @router.message(Command("invite"))
 async def cmd_invite(m: Message, command: CommandObject) -> None:
@@ -217,7 +122,7 @@ async def cmd_invite(m: Message, command: CommandObject) -> None:
         return
     email = (command.args or "").strip().lower()
     if not email:
-        await m.answer("Формат: /invite <email профиля в панели>")
+        await m.answer("Формат: /invite <email профиля в панели> (или кнопка «Админка» → клиент → «Пригласить»)")
         return
     try:
         subs = await panel.client_subids(email)
@@ -244,9 +149,7 @@ async def cmd_invites(m: Message) -> None:
     if not rows:
         await m.answer("Активных инвайтов нет.")
         return
-    lines = [
-        f"`{code}` → {email}, до {fmt_ts(exp)}" for code, email, exp in rows
-    ]
+    lines = [f"`{code}` → {email}, до {fmt_ts(exp)}" for code, email, exp in rows]
     await m.answer("Активные инвайты:\n" + "\n".join(lines))
 
 
@@ -301,15 +204,6 @@ async def cmd_bindme(m: Message, command: CommandObject) -> None:
     await greet(u, m)
 
 
-async def require_head(m: Message):
-    """Строка пользователя (email, username, is_admin, family, head), если он админ или глава семьи."""
-    u = await db.get_user(m.from_user.id)
-    if not u or not (u[2] or u[4]):
-        await db.audit(m.from_user.id, "deny_family_cmd", m.text or "")
-        return None
-    return u
-
-
 @router.message(Command("family"))
 async def cmd_family(m: Message, command: CommandObject) -> None:
     if throttled(m.from_user.id):
@@ -323,7 +217,8 @@ async def cmd_family(m: Message, command: CommandObject) -> None:
         await m.answer(
             "Формат: /family <email> <семья> [head|member] — зачислить или переместить; "
             "/family <email> - — убрать из семьи.\n"
-            "Глава управляет только своей семьёй; глав назначает админ."
+            "Глава управляет только своей семьёй; глав назначает админ. "
+            "Проще: кнопка «Админка» или «Моя семья»."
         )
         return
     email, fam = parts[0].lower(), parts[1]
@@ -346,6 +241,10 @@ async def cmd_family(m: Message, command: CommandObject) -> None:
         await db.clear_family(email)
         await db.audit(m.from_user.id, "family_clear", f"{email} <- {target[1]}")
         await m.answer(f"{email} убран из семьи «{target[1]}».")
+        return
+
+    if not FAMILY_RE.match(fam):
+        await m.answer("Имя семьи: латиница, цифры, _ и -, до 24 символов.")
         return
 
     mode = parts[2].lower() if len(parts) > 2 else ""
@@ -383,7 +282,7 @@ async def cmd_families(m: Message) -> None:
         return
     rows = await db.all_families()
     if not rows:
-        await m.answer("Семьи пока не назначены. Формат: /family <email> <семья> [head]")
+        await m.answer("Семьи пока не назначены. Проще через «Админка» → «Семьи».")
         return
     out: dict[str, list[str]] = {}
     for fam, email, head, bound in rows:
@@ -461,20 +360,7 @@ async def cmd_sync(m: Message) -> None:
     await m.answer(f"Реестр синхронизирован: {len(emails)} клиентов из панели.")
 
 
-# ---------- кнопки ----------
-
-async def my_email(m: Message) -> str | None:
-    """Email текущего пользователя или None (ответ уже отправлен)."""
-    u = await db.get_user(m.from_user.id)
-    if not u:
-        await m.answer("Вы ещё не привязаны. Нужна пригласительная ссылка от администратора.")
-        return None
-    email = u[0]
-    if email == "admin":
-        await m.answer("Администратор без своего профиля. Назначьте: /bindme <email>")
-        return None
-    return email
-
+# ---------- reply-кнопки ----------
 
 @router.message(F.text == "Моя ссылка")
 async def btn_link(m: Message) -> None:
@@ -493,7 +379,8 @@ async def btn_link(m: Message) -> None:
         "Импортируй её в приложение (кнопка «Помощь»).\n"
         "Не пересылайте ссылку посторонним и не отправляйте её через российские сервисы "
         "и мессенджеры (ВКонтакте, Одноклассники и т.п.) — там её увидят, и наш домен "
-        "могут заблокировать. Лучше передать лично или через Telegram."
+        "могут заблокировать. Лучше передать лично или через Telegram.",
+        reply_markup=await fresh_kb(m.from_user.id),
     )
 
 
@@ -517,6 +404,7 @@ async def btn_qr(m: Message) -> None:
             "Не отправляйте его через российские сервисы и мессенджеры "
             "(ВКонтакте, Одноклассники и т.п.) — только лично или через Telegram."
         ),
+        reply_markup=await fresh_kb(m.from_user.id),
     )
 
 
@@ -535,7 +423,8 @@ async def btn_nodes(m: Message) -> None:
         lines.append(f"{remark:<9} {addr:<16} {f'{ms} мс' if ms is not None else 'недоступна'}")
     await m.answer(
         "Серверы (TCP-проверка живости с мастера — это НЕ скорость с вашего телефона;\n"
-        "приложение покажет реальный пинг после импорта):\n\n" + "\n".join(lines)
+        "приложение покажет реальный пинг после импорта):\n\n" + "\n".join(lines),
+        reply_markup=await fresh_kb(m.from_user.id),
     )
 
 
@@ -543,7 +432,7 @@ async def btn_nodes(m: Message) -> None:
 async def btn_help(m: Message) -> None:
     if throttled(m.from_user.id):
         return
-    await m.answer(HELP_TEXT)
+    await m.answer(HELP_TEXT, reply_markup=await fresh_kb(m.from_user.id))
 
 
 @router.message(F.text == "Моя семья")
@@ -558,30 +447,22 @@ async def btn_family(m: Message) -> None:
     if not family or not (head or is_admin):
         await m.answer("Вы не глава семьи. Ссылки членов семьи доступны главе; своя — кнопками выше.")
         return
-    members = await db.family_members(family)
-    if not members:
-        await m.answer("В семье пока никого. Администратор добавляет: /family <email> " + (family or "<семья>"))
-        return
-    lines, kb_rows = [], []
-    for mem_email, mem_head, tg_id, username in members:
-        tag = " (глава)" if mem_head else ""
-        tag += "" if tg_id else " — не привязан к боту"
-        lines.append(mem_email + tag)
-        if mem_email != email:
-            kb_rows.append([
-                InlineKeyboardButton(text=f"{mem_email}: ссылка", callback_data=f"fl:{mem_email}"),
-                InlineKeyboardButton(text="QR", callback_data=f"fq:{mem_email}"),
-            ])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
-    footer = ""
     if head and not is_admin:
         await apply_commands(m.bot, m.from_user.id, level="head")
-        footer = (
-            "\n\nВы глава семьи: /family <email> <моя семья> — добавить или переместить ко мне, "
-            "/family <email> - — убрать из семьи."
-        )
-    await m.answer(f"Семья «{family}»:\n" + "\n".join(lines) + footer, reply_markup=kb)
+    text, markup = await render_family_view(family, email, bool(is_admin))
+    await m.answer(text, reply_markup=markup)
 
+
+@router.message(F.text == "Админка")
+async def btn_admin(m: Message) -> None:
+    if throttled(m.from_user.id):
+        return
+    if not await require_admin(m):
+        return
+    await m.answer(ROOT_TEXT, reply_markup=root_markup())
+
+
+# ---------- слэш-алиасы к кнопкам ----------
 
 @router.message(Command("link"))
 async def cmd_link_alias(m: Message) -> None:
@@ -607,6 +488,8 @@ async def cmd_help_alias(m: Message) -> None:
 async def cmd_myfamily_alias(m: Message) -> None:
     await btn_family(m)
 
+
+# ---------- ссылки/QR членов семьи ----------
 
 @router.callback_query(F.data.regexp(r"^f[ql]:"))
 async def fam_callback(cq: CallbackQuery) -> None:
@@ -668,8 +551,9 @@ async def main() -> None:
     await bot.delete_webhook(drop_pending_updates=True)
     await apply_commands(bot)
     dp = Dispatcher()
+    dp.include_router(adminui_router)
     dp.include_router(router)
-    log.info("старт бота; БД бота: %s, БД панели: %s", BOT_DB, XUI_DB)
+    log.info("старт бота; БД бота: /db/bot.db, БД панели: /data/x-ui.db")
     await dp.start_polling(bot)
 
 

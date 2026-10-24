@@ -100,6 +100,23 @@ class BotDB:
         )
         return await cur.fetchall()
 
+    async def unassigned_clients(self):
+        cur = await self.db.execute(
+            "SELECT email FROM clients WHERE family IS NULL AND email != 'admin' ORDER BY email"
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+    async def family_names(self):
+        cur = await self.db.execute(
+            """SELECT family, COUNT(*) FROM clients
+               WHERE family IS NOT NULL GROUP BY family ORDER BY family"""
+        )
+        return await cur.fetchall()
+
+    async def delete_invite(self, code: str) -> None:
+        await self.db.execute("DELETE FROM invites WHERE code=? AND used_tg_id IS NULL", (code,))
+        await self.db.commit()
+
     async def all_families(self):
         cur = await self.db.execute(
             """SELECT c.family, c.email, c.head, u.tg_id IS NOT NULL
