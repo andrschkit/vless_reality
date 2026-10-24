@@ -13,6 +13,9 @@ import qrcode
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
@@ -49,12 +52,54 @@ v2rayNG (Android): настройки → «Импорт из буфера об�
 В ссылку уже включены все серверы сразу — выбирать ноду вручную не нужно.
 Приложение само покажет пинг каждого сервера.
 
-Важно: ссылка — это доступ к VPN. Не пересылай её посторонним.
+Важно: ссылка — это доступ к VPN. Не пересылай её посторонним и не отправляй
+через российские сервисы и мессенджеры (ВКонтакте, Одноклассники и т.п.) —
+там её увидят, и наш домен могут заблокировать. Лучше лично или через Telegram.
 """
 
 db = BotDB(BOT_DB)
 panel = PanelDB(XUI_DB)
 router = Router()
+
+# Меню подсказок при вводе "/" (Bot API setMyCommands). Общий список — всем,
+# полный (служебные команды) — только чату админа (scope чата).
+USER_COMMANDS = [
+    BotCommand(command="link", description="Моя ссылка подписки"),
+    BotCommand(command="qr", description="QR-код подписки"),
+    BotCommand(command="nodes", description="Ноды и их статус"),
+    BotCommand(command="myfamily", description="Моя семья (глава семьи)"),
+    BotCommand(command="help", description="Помощь: как подключиться"),
+]
+HEAD_COMMANDS = USER_COMMANDS + [
+    BotCommand(command="family", description="Моя семья: /family <email> <моя семья>|-"),
+]
+ADMIN_COMMANDS = USER_COMMANDS + [
+    BotCommand(command="clients", description="Все клиенты панели"),
+    BotCommand(command="invite", description="Инвайт: /invite <email>"),
+    BotCommand(command="invites", description="Активные инвайты"),
+    BotCommand(command="bind", description="Привязка: /bind <tg_id|@user> <email>"),
+    BotCommand(command="bindme", description="Привязать себя: /bindme <email>"),
+    BotCommand(command="family", description="Семья: /family <email> <семья> [head|member]; «-» убрать"),
+    BotCommand(command="families", description="Обзор семей"),
+    BotCommand(command="who", description="Кто привязан: /who <email>"),
+    BotCommand(command="audit", description="Последние действия"),
+    BotCommand(command="sync", description="Синхронизация реестра с панелью"),
+]
+
+
+_LEVELS = {"user": USER_COMMANDS, "head": HEAD_COMMANDS, "admin": ADMIN_COMMANDS}
+
+
+async def apply_commands(bot: Bot, tg_id: int | None = None, level: str = "user") -> None:
+    """Меню подсказок: общее (tg_id=None) или для конкретного чата; level = user|head|admin."""
+    try:
+        cmds = _LEVELS.get(level, USER_COMMANDS)
+        if tg_id is None:
+            await bot.set_my_commands(cmds, scope=BotCommandScopeDefault())
+        else:
+            await bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=tg_id))
+    except Exception:
+        log.exception("не удалось выставить меню команд")
 
 _last_cmd: dict[int, float] = {}
 
@@ -134,6 +179,7 @@ async def cmd_start(m: Message, command: CommandObject) -> None:
     if arg and arg == ADMIN_BOOTSTRAP and ADMIN_BOOTSTRAP:
         await db.bind_user(m.from_user.id, "admin", m.from_user.username, is_admin=True)
         await db.audit(m.from_user.id, "bootstrap_admin", m.from_user.username or "")
+        await apply_commands(m.bot, m.from_user.id, level="admin")
         u = await db.get_user(m.from_user.id)
         await m.answer("Вы — администратор бота.")
         await greet(u, m)
@@ -160,6 +206,8 @@ async def require_admin(m: Message) -> bool:
     if not u or not u[2]:
         await db.audit(m.from_user.id, "deny_admin_cmd", m.text or "")
         return False
+    # идемпотентно выставляем полное меню этого чата (self-heal после пересоздания контейнера)
+    await apply_commands(m.bot, m.from_user.id, level="admin")
     return True
 
 
@@ -247,24 +295,86 @@ async def cmd_bindme(m: Message, command: CommandObject) -> None:
         return
     await db.bind_user(m.from_user.id, email, m.from_user.username, is_admin=True)
     await db.audit(m.from_user.id, "bindme", email)
+    await apply_commands(m.bot, m.from_user.id, level="admin")
     u = await db.get_user(m.from_user.id)
     await m.answer(f"Готово, администратор привязан к {email}.")
     await greet(u, m)
 
 
+async def require_head(m: Message):
+    """Строка пользователя (email, username, is_admin, family, head), если он админ или глава семьи."""
+    u = await db.get_user(m.from_user.id)
+    if not u or not (u[2] or u[4]):
+        await db.audit(m.from_user.id, "deny_family_cmd", m.text or "")
+        return None
+    return u
+
+
 @router.message(Command("family"))
 async def cmd_family(m: Message, command: CommandObject) -> None:
-    if throttled(m.from_user.id) or not await require_admin(m):
+    if throttled(m.from_user.id):
         return
+    u = await require_head(m)
+    if not u:
+        return
+    _me, _un, is_admin, my_family, _is_head = u
     parts = (command.args or "").split()
     if len(parts) < 2:
-        await m.answer("Формат: /family <email> <семья> [head] — зачислить в семью; head = назначить главой.")
+        await m.answer(
+            "Формат: /family <email> <семья> [head|member] — зачислить или переместить; "
+            "/family <email> - — убрать из семьи.\n"
+            "Глава управляет только своей семьёй; глав назначает админ."
+        )
         return
     email, fam = parts[0].lower(), parts[1]
-    head = len(parts) > 2 and parts[2] == "head"
-    await db.set_family(email, fam, True if head else None)
-    await db.audit(m.from_user.id, "family_set", f"{email} -> {fam} head={head}")
-    await m.answer(f"{email} → семья «{fam}»" + (" (глава)" if head else ""))
+    if email == "admin":
+        await m.answer("«admin» — служебный профиль бота, его нельзя зачислять в семью.")
+        return
+    target = await db.get_client(email)
+
+    if fam == "-":
+        if not target or not target[1]:
+            await m.answer(f"{email} и так не состоит в семье.")
+            return
+        if not is_admin:
+            if target[1] != my_family:
+                await m.answer("Глава может убирать только из СВОЕЙ семьи.")
+                return
+            if target[2]:
+                await m.answer("Главу семьи может убирать только админ.")
+                return
+        await db.clear_family(email)
+        await db.audit(m.from_user.id, "family_clear", f"{email} <- {target[1]}")
+        await m.answer(f"{email} убран из семьи «{target[1]}».")
+        return
+
+    mode = parts[2].lower() if len(parts) > 2 else ""
+    if mode == "head":
+        if not is_admin:
+            await m.answer("Глав назначает только админ.")
+            return
+        head_val: bool | None = True
+    elif mode == "member":
+        head_val = False
+    elif mode == "":
+        head_val = None  # статус главы не меняем (чистое перемещение)
+    else:
+        await m.answer("Третий аргумент, если есть: head или member.")
+        return
+
+    if not is_admin:
+        if fam != my_family:
+            await m.answer(f"Глава может зачислять только в свою семью «{my_family}».")
+            return
+        if target and target[2] and target[1] != my_family:
+            await m.answer(f"{email} — глава другой семьи; перемещать глав может только админ.")
+            return
+
+    await db.set_family(email, fam, head_val)
+    await db.audit(m.from_user.id, "family_set", f"{email} -> {fam} head={head_val}")
+    moved = target is not None and target[1] is not None and target[1] != fam
+    verb = "перемещён" if moved else "зачислен"
+    await m.answer(f"{email} {verb} в семью «{fam}»" + (" (глава)" if head_val else ""))
 
 
 @router.message(Command("families"))
@@ -380,7 +490,10 @@ async def btn_link(m: Message) -> None:
     await db.audit(m.from_user.id, "get_link", email)
     await m.answer(
         f"Ваша ссылка подписки — все сервера сразу:\n\n{SUB_URI}{subid}\n\n"
-        "Импортируй её в приложение кнопкой «Помощь». Ссылку не пересылайте посторонним."
+        "Импортируй её в приложение (кнопка «Помощь»).\n"
+        "Не пересылайте ссылку посторонним и не отправляйте её через российские сервисы "
+        "и мессенджеры (ВКонтакте, Одноклассники и т.п.) — там её увидят, и наш домен "
+        "могут заблокировать. Лучше передать лично или через Telegram."
     )
 
 
@@ -397,7 +510,14 @@ async def btn_qr(m: Message) -> None:
         return
     await db.audit(m.from_user.id, "get_qr", email)
     link = SUB_URI + subid
-    await m.answer_photo(qr_photo(link), caption=f"QR вашей подписки ({email}). Сканируйте приложением.")
+    await m.answer_photo(
+        qr_photo(link),
+        caption=(
+            f"QR вашей подписки ({email}). Сканируйте приложением.\n"
+            "Не отправляйте его через российские сервисы и мессенджеры "
+            "(ВКонтакте, Одноклассники и т.п.) — только лично или через Telegram."
+        ),
+    )
 
 
 @router.message(F.text == "Ноды и статус")
@@ -453,7 +573,39 @@ async def btn_family(m: Message) -> None:
                 InlineKeyboardButton(text="QR", callback_data=f"fq:{mem_email}"),
             ])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
-    await m.answer(f"Семья «{family}»:\n" + "\n".join(lines), reply_markup=kb)
+    footer = ""
+    if head and not is_admin:
+        await apply_commands(m.bot, m.from_user.id, level="head")
+        footer = (
+            "\n\nВы глава семьи: /family <email> <моя семья> — добавить или переместить ко мне, "
+            "/family <email> - — убрать из семьи."
+        )
+    await m.answer(f"Семья «{family}»:\n" + "\n".join(lines) + footer, reply_markup=kb)
+
+
+@router.message(Command("link"))
+async def cmd_link_alias(m: Message) -> None:
+    await btn_link(m)
+
+
+@router.message(Command("qr"))
+async def cmd_qr_alias(m: Message) -> None:
+    await btn_qr(m)
+
+
+@router.message(Command("nodes"))
+async def cmd_nodes_alias(m: Message) -> None:
+    await btn_nodes(m)
+
+
+@router.message(Command("help"))
+async def cmd_help_alias(m: Message) -> None:
+    await btn_help(m)
+
+
+@router.message(Command("myfamily"))
+async def cmd_myfamily_alias(m: Message) -> None:
+    await btn_family(m)
 
 
 @router.callback_query(F.data.regexp(r"^f[ql]:"))
@@ -473,9 +625,17 @@ async def fam_callback(cq: CallbackQuery) -> None:
     await db.audit(cq.from_user.id, f"fam_{'link' if kind == 'l' else 'qr'}", email)
     link = SUB_URI + subid
     if kind == "l":
-        await cq.message.answer(f"Ссылка для {email}:\n\n{link}\n\nПередайте лично и попросите не пересылать дальше.")
+        await cq.message.answer(
+            f"Ссылка для {email}:\n\n{link}\n\n"
+            "Передайте её лично или через Telegram, не через российские сервисы "
+            "и мессенджеры (ВКонтакте, Одноклассники и т.п.) — там её увидят, и наш домен "
+            "могут заблокировать. Попросите не пересылать дальше."
+        )
     else:
-        await cq.message.answer_photo(qr_photo(link), caption=f"QR подписки для {email}.")
+        await cq.message.answer_photo(
+            qr_photo(link),
+            caption=f"QR подписки для {email}.\nПередайте лично или через Telegram, не через российские сервисы и мессенджеры.",
+        )
     await cq.answer()
 
 
@@ -506,6 +666,7 @@ async def main() -> None:
     await panel.open()
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
+    await apply_commands(bot)
     dp = Dispatcher()
     dp.include_router(router)
     log.info("старт бота; БД бота: %s, БД панели: %s", BOT_DB, XUI_DB)

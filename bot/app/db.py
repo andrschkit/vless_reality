@@ -79,6 +79,10 @@ class BotDB:
             )
         await self.db.commit()
 
+    async def clear_family(self, email: str) -> None:
+        await self.db.execute("UPDATE clients SET family=NULL, head=0 WHERE email=?", (email,))
+        await self.db.commit()
+
     async def family_members(self, family: str):
         cur = await self.db.execute(
             """SELECT c.email, c.head, u.tg_id, u.username
