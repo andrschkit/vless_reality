@@ -3,8 +3,8 @@ cert/
 backups/
 __pycache__/
 *.pyc
-# Операционные секреты и заметки (см. AGENTS.md). В git не коммитить!
-AGENTS.md
+# Операционные секреты и заметки. В git не коммитить!
+AGENTS.secrets.md
 clients.txt
 *.keys
 .porkbun-keys
